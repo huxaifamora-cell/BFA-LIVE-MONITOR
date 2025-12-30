@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Valid Signal Monitor</title>
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css" rel="stylesheet"/>
+  <link rel="stylesheet" href="styles.css"/>
+</head>
+<body>
+  <div class="container">
+    <!-- Header -->
+    <header class="header">
+      <h1>⚡ BFA Valid Signal Monitor</h1>
+      <p class="subtitle">(Auto-refreshes every 2s)</p>
+      <div id="active-signals" class="active-signals">0 Valid Signals: [H1: 0 | M30: 0]</div>
+    </header>
+
+    <!-- Table -->
+    <section class="table-section">
+      <table id="signalsTable">
+        <thead>
+          <tr>
+            <th>SYMBOL</th>
+            <th>TRADE</th>
+            <th>TIMEFRAME</th>
+            <th>DURATION</th>
+            <th>H4</th>
+            <th>D1</th>
+          </tr>
+        </thead>
+        <tbody id="signal-body">
+          <tr id="empty">
+            <td colspan="6" class="no-signal">Loading signals...</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- Footer -->
+    <footer class="footer">
+      <div class="footer-icons">
+        <a href="https://www.facebook.com/share/17e3HUA44g" target="_blank"><i class="fab fa-facebook-f"></i></a>
+        <a href="https://www.tiktok.com/@basefx.com.ng?_t=ZS-90leoAwEweA&_r=1" target="_blank"><i class="fab fa-tiktok"></i></a>
+        <a href="https://wa.me/23409032259756?text=Hello%20BFA%2C%20I%20was%20from%20your%20valid%20signal%20monitor.%0A___" target="_blank"><i class="fab fa-whatsapp"></i></a>
+      </div>
+      <p>© <span id="year"></span> BFA Valid Signal Monitor - Powered by Deriv</p>
+    </footer>
+  </div>
+
+  <script src="app.js"></script>
+  <script>document.getElementById("year").textContent = new Date().getFullYear();</script>
+  <script>
+    document.getElementById("year").textContent = new Date().getFullYear();
+
+    // ✅ Automatically color BUY/SELL text (green/red)
+    const observer = new MutationObserver(() => {
+      document.querySelectorAll("#signal-body td:nth-child(2)").forEach(cell => {
+        const text = cell.textContent.trim().toUpperCase();
+        cell.classList.remove("buy", "sell");
+        if (text === "BUY") cell.classList.add("buy");
+        else if (text === "SELL") cell.classList.add("sell");
+      });
+    });
+
+    observer.observe(document.getElementById("signal-body"), { childList: true, subtree: true });
+  </script>
+</body>
+</html>
