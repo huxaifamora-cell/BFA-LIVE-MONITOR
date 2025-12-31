@@ -1,207 +1,211 @@
-// Auto-detect WebSocket URL (works locally and on Render)
-const WS_URL = window.location.protocol === 'https:' 
-  ? 'wss://' + window.location.host 
-  : 'ws://' + window.location.host;
-const tableBody = document.querySelector("#signal-body");
-const activeSignalsEl = document.getElementById("active-signals");
+const WebSocket = require('ws');
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
 
-let ws = null;
-let reconnectInterval = null;
-let cache = new Map();
+const PORT = process.env.PORT || 8080; // Render provides PORT automatically
+const SIGNAL_TIMEOUT_MS = 120000; // 2 minutes (can be adjusted)
 
-// Format elapsed time
-function formatElapsed(iso) {
-  if (!iso) return "-";
-  const diff = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
-  if (diff < 60) return diff + 's';
-  const mins = Math.floor(diff / 60);
-  if (mins < 60) return mins + 'm ' + (diff % 60) + 's';
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return hrs + 'h ' + (mins % 60) + 'm';
-  const days = Math.floor(hrs / 24);
-  return days + 'd ' + (hrs % 24) + 'h';
+// In-memory storage for active signals (no database!)
+const activeSignals = new Map();
+
+// Create HTTP server for serving files
+const server = http.createServer((req, res) => {
+    let filePath = '.' + req.url;
+    if (filePath === './') filePath = './index.html';
+
+    const extname = String(path.extname(filePath)).toLowerCase();
+    const mimeTypes = {
+        '.html': 'text/html',
+        '.js': 'text/javascript',
+        '.css': 'text/css',
+        '.json': 'application/json',
+    };
+
+    const contentType = mimeTypes[extname] || 'application/octet-stream';
+
+    fs.readFile(filePath, (error, content) => {
+        if (error) {
+            if (error.code == 'ENOENT') {
+                res.writeHead(404);
+                res.end('404 Not Found');
+            } else {
+                res.writeHead(500);
+                res.end('Server Error: ' + error.code);
+            }
+        } else {
+            res.writeHead(200, { 'Content-Type': contentType });
+            res.end(content, 'utf-8');
+        }
+    });
+});
+
+// Create WebSocket server
+const wss = new WebSocket.Server({ server });
+
+// Broadcast to all connected clients
+function broadcast(data) {
+    const message = JSON.stringify(data);
+    wss.clients.forEach(client => {
+        if (client.readyState === WebSocket.OPEN) {
+            client.send(message);
+        }
+    });
 }
 
-// Generate unique key for signal
-function keyOf(s) {
-  return `${s.symbol}|${s.timeframe}`;
-}
+// Clean expired signals and notify clients
+function cleanExpiredSignals() {
+    const now = Date.now();
+    let hasChanges = false;
 
-// Compute trade type
-function computeTradeType(sig) {
-  if (sig.type && sig.type !== '-' && sig.type.trim() !== '') 
-    return sig.type.toUpperCase();
-  return sig.symbol.toLowerCase().includes("crash") ? "BUY" : "SELL";
-}
-
-// Generate row HTML
-function rowHtml(sig) {
-  const tradeType = computeTradeType(sig);
-  const cls = tradeType === "BUY" ? "buy" : "sell";
-  
-  const h4Fmt = sig.H4?.toLowerCase().includes("up") 
-    ? `<span class="trend-up">${sig.H4}</span>` 
-    : sig.H4?.toLowerCase().includes("down") 
-    ? `<span class="trend-down">${sig.H4}</span>` 
-    : (sig.H4 ?? "-");
-    
-  const d1Fmt = sig.D1?.toLowerCase().includes("up") 
-    ? `<span class="trend-up">${sig.D1}</span>` 
-    : sig.D1?.toLowerCase().includes("down") 
-    ? `<span class="trend-down">${sig.D1}</span>` 
-    : (sig.D1 ?? "-");
-
-  return `
-    <tr class="${cls}" data-key="${keyOf(sig)}">
-      <td>${sig.symbol}</td>
-      <td>${tradeType}</td>
-      <td>${sig.timeframe}</td>
-      <td data-time="${sig.validSince}">${formatElapsed(sig.validSince)}</td>
-      <td>${h4Fmt}</td>
-      <td>${d1Fmt}</td>
-    </tr>
-  `;
-}
-
-// Update table with new signals
-function updateTable(signals) {
-  if (!Array.isArray(signals) || signals.length === 0) {
-    tableBody.innerHTML = '<tr><td colspan="6" class="no-signal">No valid signals yet</td></tr>';
-    activeSignalsEl.textContent = `0 Valid Signals: (H1: 0 | M30: 0)`;
-    cache.clear();
-    return;
-  }
-
-  // Sort alphabetically
-  signals.sort((a, b) => a.symbol.localeCompare(b.symbol));
-
-  const h1Count = signals.filter(s => s.timeframe === 'H1').length;
-  const m30Count = signals.filter(s => s.timeframe === 'M30').length;
-  activeSignalsEl.textContent = `${h1Count + m30Count} Valid Signals: (H1: ${h1Count} | M30: ${m30Count})`;
-
-  const newKeys = new Set(signals.map(s => keyOf(s)));
-
-  // Remove invalidated signals
-  tableBody.querySelectorAll('tr[data-key]').forEach(r => {
-    const k = r.getAttribute('data-key');
-    if (!newKeys.has(k)) {
-      r.remove();
-      cache.delete(k);
-    }
-  });
-
-  // Build rows
-  const frag = document.createDocumentFragment();
-  signals.forEach(sig => {
-    const k = keyOf(sig);
-    const sigJSON = JSON.stringify(sig);
-    const cached = cache.get(k);
-
-    if (cached && cached.json === sigJSON) {
-      const existing = tableBody.querySelector(`tr[data-key="${k}"]`);
-      if (existing) {
-        frag.appendChild(existing);
-        return;
-      }
+    for (const [key, signal] of activeSignals.entries()) {
+        if (now - signal.lastUpdate > SIGNAL_TIMEOUT_MS) {
+            activeSignals.delete(key);
+            hasChanges = true;
+            console.log(`🗑️  Removed expired signal: ${key}`);
+        }
     }
 
-    const tmp = document.createElement('tbody');
-    tmp.innerHTML = rowHtml(sig);
-    frag.appendChild(tmp.querySelector('tr'));
-    cache.set(k, { json: sigJSON });
-  });
-
-  tableBody.innerHTML = '';
-  tableBody.appendChild(frag);
+    if (hasChanges) {
+        broadcastCurrentSignals();
+    }
 }
 
-// Show connection status
-function updateConnectionStatus(connected) {
-  const header = document.querySelector('.header');
-  let statusEl = document.getElementById('connection-status');
-  
-  if (!statusEl) {
-    statusEl = document.createElement('div');
-    statusEl.id = 'connection-status';
-    statusEl.style.cssText = 'margin-top: 10px; padding: 8px 16px; border-radius: 6px; font-size: 0.9rem; display: inline-block;';
-    header.appendChild(statusEl);
-  }
+// Broadcast current active signals
+function broadcastCurrentSignals() {
+    const signals = Array.from(activeSignals.values()).map(s => ({
+        symbol: s.symbol,
+        timeframe: s.timeframe,
+        type: s.type,
+        H4: s.h4_trend,
+        D1: s.d1_trend,
+        validSince: s.validSince,
+        min_lot: s.min_lot,
+        min_margin: s.min_margin
+    }));
 
-  if (connected) {
-    statusEl.textContent = '🟢 Connected (Live)';
-    statusEl.style.background = 'rgba(0, 255, 136, 0.2)';
-    statusEl.style.color = '#00ff88';
-  } else {
-    statusEl.textContent = '🔴 Disconnected (Reconnecting...)';
-    statusEl.style.background = 'rgba(255, 51, 102, 0.2)';
-    statusEl.style.color = '#ff3366';
-  }
+    broadcast({
+        type: 'signals_update',
+        indicators: signals,
+        count: signals.length,
+        timestamp: new Date().toISOString()
+    });
 }
 
-// Connect to WebSocket server
-function connect() {
-  if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) {
-    return; // Already connected or connecting
-  }
+// Handle WebSocket connections
+wss.on('connection', (ws, req) => {
+    const clientIP = req.socket.remoteAddress;
+    console.log(`✅ Client connected: ${clientIP}`);
 
-  console.log('🔌 Connecting to WebSocket server...');
-  ws = new WebSocket(WS_URL);
+    // Send current signals immediately to new client
+    ws.send(JSON.stringify({
+        type: 'signals_update',
+        indicators: Array.from(activeSignals.values()).map(s => ({
+            symbol: s.symbol,
+            timeframe: s.timeframe,
+            type: s.type,
+            H4: s.h4_trend,
+            D1: s.d1_trend,
+            validSince: s.validSince,
+            min_lot: s.min_lot,
+            min_margin: s.min_margin
+        })),
+        count: activeSignals.size,
+        timestamp: new Date().toISOString()
+    }));
 
-  ws.onopen = () => {
-    console.log('✅ WebSocket connected!');
-    updateConnectionStatus(true);
-    
-    // Clear reconnect interval if exists
-    if (reconnectInterval) {
-      clearInterval(reconnectInterval);
-      reconnectInterval = null;
-    }
-  };
+    // Handle messages from clients
+    ws.on('message', (message) => {
+        try {
+            const data = JSON.parse(message);
 
-  ws.onmessage = (event) => {
-    try {
-      const data = JSON.parse(event.data);
-      
-      if (data.type === 'signals_update') {
-        console.log(`📊 Received ${data.count} signals`);
-        updateTable(data.indicators || []);
-      }
-    } catch (err) {
-      console.error('Error parsing WebSocket message:', err);
-    }
-  };
+            // Handle signal from EA
+            if (data.type === 'signal') {
+                const key = `${data.symbol}|${data.timeframe}`;
+                const now = Date.now();
+                
+                const existing = activeSignals.get(key);
+                
+                if (!existing) {
+                    // New signal
+                    activeSignals.set(key, {
+                        symbol: data.symbol,
+                        timeframe: data.timeframe,
+                        type: data.trade_type,
+                        h4_trend: data.h4_trend || '-',
+                        d1_trend: data.d1_trend || '-',
+                        min_lot: data.min_lot || 0,
+                        min_margin: data.min_margin || 0,
+                        validSince: new Date().toISOString(),
+                        lastUpdate: now
+                    });
+                    console.log(`🚨 NEW SIGNAL: ${data.symbol} ${data.timeframe} ${data.trade_type}`);
+                } else {
+                    // Update existing signal
+                    existing.type = data.trade_type;
+                    existing.h4_trend = data.h4_trend || '-';
+                    existing.d1_trend = data.d1_trend || '-';
+                    existing.min_lot = data.min_lot || 0;
+                    existing.min_margin = data.min_margin || 0;
+                    existing.lastUpdate = now;
+                    console.log(`🔄 UPDATED: ${data.symbol} ${data.timeframe}`);
+                }
 
-  ws.onerror = (error) => {
-    console.error('❌ WebSocket error:', error);
-  };
+                // Broadcast immediately to all clients
+                broadcastCurrentSignals();
+            }
 
-  ws.onclose = () => {
-    console.log('🔌 WebSocket disconnected');
-    updateConnectionStatus(false);
-    
-    // Auto-reconnect every 3 seconds
-    if (!reconnectInterval) {
-      reconnectInterval = setInterval(() => {
-        console.log('🔄 Attempting to reconnect...');
-        connect();
-      }, 3000);
-    }
-  };
-}
+            // Handle signal removal from EA (when conditions no longer met)
+            if (data.type === 'remove_signal') {
+                const key = `${data.symbol}|${data.timeframe}`;
+                if (activeSignals.delete(key)) {
+                    console.log(`❌ REMOVED: ${data.symbol} ${data.timeframe}`);
+                    broadcastCurrentSignals();
+                }
+            }
 
-// Update elapsed time every second
-setInterval(() => {
-  document.querySelectorAll('td[data-time]').forEach(td => {
-    td.textContent = formatElapsed(td.dataset.time);
-  });
-}, 1000);
+        } catch (err) {
+            console.error('Error parsing message:', err);
+        }
+    });
 
-// Initialize connection
-connect();
+    ws.on('close', () => {
+        console.log(`❌ Client disconnected: ${clientIP}`);
+    });
 
-// Expose for debugging
-window.wsDebug = {
-  reconnect: connect,
-  getActiveSignals: () => Array.from(cache.keys()),
-  getWebSocket: () => ws
-};
+    ws.on('error', (error) => {
+        console.error('WebSocket error:', error);
+    });
+});
+
+// Clean expired signals every 5 seconds
+setInterval(cleanExpiredSignals, 5000);
+
+// Start server (bind to 0.0.0.0 for Render)
+server.listen(PORT, '0.0.0.0', () => {
+    console.log(`
+╔════════════════════════════════════════════╗
+║   🚀 BFA LIVE MONITOR SERVER RUNNING       ║
+╚════════════════════════════════════════════╝
+
+📡 WebSocket Server: ws://localhost:${PORT}
+🌐 HTTP Server: http://localhost:${PORT}
+⏱️  Signal Timeout: ${SIGNAL_TIMEOUT_MS / 1000} seconds
+💾 Storage: In-Memory (No Database)
+🔄 Auto-cleanup: Every 5 seconds
+
+Waiting for connections...
+    `);
+});
+
+// Graceful shutdown
+process.on('SIGINT', () => {
+    console.log('\n🛑 Shutting down server...');
+    wss.clients.forEach(client => {
+        client.close();
+    });
+    server.close(() => {
+        console.log('✅ Server closed');
+        process.exit(0);
+    });
+});
