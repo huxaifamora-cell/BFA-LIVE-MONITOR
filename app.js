@@ -1,4 +1,7 @@
-const WS_URL = 'ws://localhost:8080'; // Change to your server URL
+// Auto-detect WebSocket URL (works locally and on Render)
+const WS_URL = window.location.protocol === 'https:' 
+  ? 'wss://' + window.location.host 
+  : 'ws://' + window.location.host;
 const tableBody = document.querySelector("#signal-body");
 const activeSignalsEl = document.getElementById("active-signals");
 
