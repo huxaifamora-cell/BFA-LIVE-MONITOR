@@ -3,7 +3,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 
-const PORT = 8080;
+const PORT = process.env.PORT || 8080; // Render provides PORT automatically
 const SIGNAL_TIMEOUT_MS = 120000; // 2 minutes (can be adjusted)
 
 // In-memory storage for active signals (no database!)
@@ -181,8 +181,8 @@ wss.on('connection', (ws, req) => {
 // Clean expired signals every 5 seconds
 setInterval(cleanExpiredSignals, 5000);
 
-// Start server
-server.listen(PORT, () => {
+// Start server (bind to 0.0.0.0 for Render)
+server.listen(PORT, '0.0.0.0', () => {
     console.log(`
 ╔════════════════════════════════════════════╗
 ║   🚀 BFA LIVE MONITOR SERVER RUNNING       ║
