@@ -9,8 +9,89 @@ const SIGNAL_TIMEOUT_MS = 120000; // 2 minutes (can be adjusted)
 // In-memory storage for active signals (no database!)
 const activeSignals = new Map();
 
-// Create HTTP server for serving files
+// Create HTTP server for serving files AND receiving EA signals
 const server = http.createServer((req, res) => {
+    // Handle POST requests from MT5 EA
+    if (req.method === 'POST' && req.url === '/') {
+        let body = '';
+        
+        req.on('data', chunk => {
+            body += chunk.toString();
+        });
+        
+        req.on('end', () => {
+            try {
+                const data = JSON.parse(body);
+                console.log('📥 Received from EA:', data.type, data.symbol, data.timeframe);
+                
+                // Handle signal from EA
+                if (data.type === 'signal') {
+                    const key = `${data.symbol}|${data.timeframe}`;
+                    const now = Date.now();
+                    
+                    const existing = activeSignals.get(key);
+                    
+                    if (!existing) {
+                        // New signal
+                        activeSignals.set(key, {
+                            symbol: data.symbol,
+                            timeframe: data.timeframe,
+                            type: data.trade_type,
+                            h4_trend: data.h4_trend || '-',
+                            d1_trend: data.d1_trend || '-',
+                            min_lot: data.min_lot || 0,
+                            min_margin: data.min_margin || 0,
+                            validSince: new Date().toISOString(),
+                            lastUpdate: now
+                        });
+                        console.log(`🚨 NEW SIGNAL: ${data.symbol} ${data.timeframe} ${data.trade_type}`);
+                    } else {
+                        // Update existing signal
+                        existing.type = data.trade_type;
+                        existing.h4_trend = data.h4_trend || '-';
+                        existing.d1_trend = data.d1_trend || '-';
+                        existing.min_lot = data.min_lot || 0;
+                        existing.min_margin = data.min_margin || 0;
+                        existing.lastUpdate = now;
+                        console.log(`🔄 UPDATED: ${data.symbol} ${data.timeframe}`);
+                    }
+
+                    // Broadcast immediately to all WebSocket clients
+                    broadcastCurrentSignals();
+                    
+                    // Send success response to EA
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: true, message: 'Signal received' }));
+                    return;
+                }
+
+                // Handle signal removal from EA
+                if (data.type === 'remove_signal') {
+                    const key = `${data.symbol}|${data.timeframe}`;
+                    if (activeSignals.delete(key)) {
+                        console.log(`❌ REMOVED: ${data.symbol} ${data.timeframe}`);
+                        broadcastCurrentSignals();
+                    }
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ success: true, message: 'Signal removed' }));
+                    return;
+                }
+
+                // Unknown request type
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Unknown request type' }));
+                
+            } catch (err) {
+                console.error('❌ Error parsing JSON:', err);
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Invalid JSON' }));
+            }
+        });
+        
+        return;
+    }
+    
+    // Serve static files for GET requests
     let filePath = '.' + req.url;
     if (filePath === './') filePath = './index.html';
 
@@ -114,58 +195,32 @@ wss.on('connection', (ws, req) => {
         timestamp: new Date().toISOString()
     }));
 
-    // Handle messages from clients
+    // Handle messages from WebSocket clients (browser only, not EA)
     ws.on('message', (message) => {
         try {
             const data = JSON.parse(message);
-
-            // Handle signal from EA
-            if (data.type === 'signal') {
-                const key = `${data.symbol}|${data.timeframe}`;
-                const now = Date.now();
-                
-                const existing = activeSignals.get(key);
-                
-                if (!existing) {
-                    // New signal
-                    activeSignals.set(key, {
-                        symbol: data.symbol,
-                        timeframe: data.timeframe,
-                        type: data.trade_type,
-                        h4_trend: data.h4_trend || '-',
-                        d1_trend: data.d1_trend || '-',
-                        min_lot: data.min_lot || 0,
-                        min_margin: data.min_margin || 0,
-                        validSince: new Date().toISOString(),
-                        lastUpdate: now
-                    });
-                    console.log(`🚨 NEW SIGNAL: ${data.symbol} ${data.timeframe} ${data.trade_type}`);
-                } else {
-                    // Update existing signal
-                    existing.type = data.trade_type;
-                    existing.h4_trend = data.h4_trend || '-';
-                    existing.d1_trend = data.d1_trend || '-';
-                    existing.min_lot = data.min_lot || 0;
-                    existing.min_margin = data.min_margin || 0;
-                    existing.lastUpdate = now;
-                    console.log(`🔄 UPDATED: ${data.symbol} ${data.timeframe}`);
-                }
-
-                // Broadcast immediately to all clients
-                broadcastCurrentSignals();
+            console.log('📨 WebSocket message from browser:', data);
+            
+            // Browsers can request current signals
+            if (data.type === 'get_signals') {
+                ws.send(JSON.stringify({
+                    type: 'signals_update',
+                    indicators: Array.from(activeSignals.values()).map(s => ({
+                        symbol: s.symbol,
+                        timeframe: s.timeframe,
+                        type: s.type,
+                        H4: s.h4_trend,
+                        D1: s.d1_trend,
+                        validSince: s.validSince,
+                        min_lot: s.min_lot,
+                        min_margin: s.min_margin
+                    })),
+                    count: activeSignals.size,
+                    timestamp: new Date().toISOString()
+                }));
             }
-
-            // Handle signal removal from EA (when conditions no longer met)
-            if (data.type === 'remove_signal') {
-                const key = `${data.symbol}|${data.timeframe}`;
-                if (activeSignals.delete(key)) {
-                    console.log(`❌ REMOVED: ${data.symbol} ${data.timeframe}`);
-                    broadcastCurrentSignals();
-                }
-            }
-
         } catch (err) {
-            console.error('Error parsing message:', err);
+            console.error('Error parsing WebSocket message:', err);
         }
     });
 
