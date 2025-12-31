@@ -21,7 +21,9 @@ const server = http.createServer((req, res) => {
         
         req.on('end', () => {
             try {
+                console.log('📦 Raw body received:', body);
                 const data = JSON.parse(body);
+                console.log('📥 Parsed data:', data);
                 console.log('📥 Received from EA:', data.type, data.symbol, data.timeframe);
                 
                 // Handle signal from EA
