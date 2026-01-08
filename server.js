@@ -4,7 +4,6 @@ const fs = require('fs');
 const path = require('path');
 
 const PORT = process.env.PORT || 8080; // Render provides PORT automatically
-const SIGNAL_TIMEOUT_MS = 120000; // 2 minutes (can be adjusted)
 
 // In-memory storage for active signals (no database!)
 const activeSignals = new Map();
@@ -48,7 +47,7 @@ const server = http.createServer((req, res) => {
                         });
                         console.log(`🚨 NEW SIGNAL: ${data.symbol} ${data.timeframe} ${data.trade_type}`);
                     } else {
-                        // Update existing signal
+                        // Update existing signal (keep original validSince)
                         existing.type = data.trade_type;
                         existing.h4_trend = data.h4_trend || '-';
                         existing.d1_trend = data.d1_trend || '-';
@@ -136,24 +135,6 @@ function broadcast(data) {
     });
 }
 
-// Clean expired signals and notify clients
-function cleanExpiredSignals() {
-    const now = Date.now();
-    let hasChanges = false;
-
-    for (const [key, signal] of activeSignals.entries()) {
-        if (now - signal.lastUpdate > SIGNAL_TIMEOUT_MS) {
-            activeSignals.delete(key);
-            hasChanges = true;
-            console.log(`🗑️  Removed expired signal: ${key}`);
-        }
-    }
-
-    if (hasChanges) {
-        broadcastCurrentSignals();
-    }
-}
-
 // Broadcast current active signals
 function broadcastCurrentSignals() {
     const signals = Array.from(activeSignals.values()).map(s => ({
@@ -235,9 +216,6 @@ wss.on('connection', (ws, req) => {
     });
 });
 
-// Clean expired signals every 5 seconds
-setInterval(cleanExpiredSignals, 5000);
-
 // Start server (bind to 0.0.0.0 for Render)
 server.listen(PORT, '0.0.0.0', () => {
     console.log(`
@@ -247,9 +225,11 @@ server.listen(PORT, '0.0.0.0', () => {
 
 📡 WebSocket Server: ws://localhost:${PORT}
 🌐 HTTP Server: http://localhost:${PORT}
-⏱️  Signal Timeout: ${SIGNAL_TIMEOUT_MS / 1000} seconds
 💾 Storage: In-Memory (No Database)
-🔄 Auto-cleanup: Every 5 seconds
+✅ Signal Removal: Controlled by EA only
+
+⚠️  IMPORTANT: Signals remain active until EA explicitly
+   removes them when conditions are no longer met.
 
 Waiting for connections...
     `);
