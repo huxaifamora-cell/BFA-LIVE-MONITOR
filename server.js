@@ -192,6 +192,40 @@ function broadcast(data) {
     });
 }
 
+// Helper function to get timeframe order (lower number = higher priority)
+function getTimeframeOrder(tf) {
+    const order = { 'H1': 1, 'M30': 2, 'M15': 3, 'M5': 4, 'H4': 5, 'D1': 6 };
+    return order[tf] || 999;
+}
+
+// Helper function to extract number from symbol (e.g., "BOOM1000" -> 1000)
+function getSymbolNumber(symbol) {
+    const match = symbol.match(/(\d+)/);
+    return match ? parseInt(match[1]) : 0;
+}
+
+// Sorting function for signals
+function sortSignals(signals) {
+    return signals.sort((a, b) => {
+        // 1. Sort by number in symbol (higher numbers first: 1000, 900, 600, etc.)
+        const aNum = getSymbolNumber(a.symbol);
+        const bNum = getSymbolNumber(b.symbol);
+        if (aNum !== bNum) return bNum - aNum; // Descending order
+        
+        // 2. Then by symbol alphabetically (for symbols with same number or no number)
+        if (a.symbol !== b.symbol) {
+            return a.symbol.localeCompare(b.symbol);
+        }
+        
+        // 3. For same symbol, sort by timeframe (H1 before M30, etc.)
+        const tfOrder = getTimeframeOrder(a.timeframe) - getTimeframeOrder(b.timeframe);
+        if (tfOrder !== 0) return tfOrder;
+        
+        // 4. Finally by validSince (older first)
+        return new Date(a.validSince) - new Date(b.validSince);
+    });
+}
+
 // Broadcast current active signals
 function broadcastCurrentSignals() {
     const signals = Array.from(activeSignals.values())
@@ -205,16 +239,11 @@ function broadcastCurrentSignals() {
             min_lot: s.min_lot,
             min_margin: s.min_margin,
             priority: s.priority || 1
-        }))
-        .sort((a, b) => {
-            // Sort by priority (higher first), then by validSince (older first)
-            if (b.priority !== a.priority) return b.priority - a.priority;
-            return new Date(a.validSince) - new Date(b.validSince);
-        });
+        }));
 
     broadcast({
         type: 'signals_update',
-        indicators: signals,
+        indicators: sortSignals(signals),
         count: signals.length,
         timestamp: new Date().toISOString()
     });
@@ -265,24 +294,22 @@ wss.on('connection', (ws, req) => {
     console.log(`✅ Browser client connected: ${clientIP}`);
 
     // Send current signals immediately to new client
+    const currentSignals = Array.from(activeSignals.values())
+        .map(s => ({
+            symbol: s.symbol,
+            timeframe: s.timeframe,
+            type: s.type,
+            H4: s.h4_trend,
+            D1: s.d1_trend,
+            validSince: s.validSince,
+            min_lot: s.min_lot,
+            min_margin: s.min_margin,
+            priority: s.priority || 1
+        }));
+    
     ws.send(JSON.stringify({
         type: 'signals_update',
-        indicators: Array.from(activeSignals.values())
-            .map(s => ({
-                symbol: s.symbol,
-                timeframe: s.timeframe,
-                type: s.type,
-                H4: s.h4_trend,
-                D1: s.d1_trend,
-                validSince: s.validSince,
-                min_lot: s.min_lot,
-                min_margin: s.min_margin,
-                priority: s.priority || 1
-            }))
-            .sort((a, b) => {
-                if (b.priority !== a.priority) return b.priority - a.priority;
-                return new Date(a.validSince) - new Date(b.validSince);
-            }),
+        indicators: sortSignals(currentSignals),
         count: activeSignals.size,
         timestamp: new Date().toISOString()
     }));
@@ -302,24 +329,22 @@ wss.on('connection', (ws, req) => {
             console.log('📨 WebSocket message from browser:', data);
             
             if (data.type === 'get_signals') {
+                const signals = Array.from(activeSignals.values())
+                    .map(s => ({
+                        symbol: s.symbol,
+                        timeframe: s.timeframe,
+                        type: s.type,
+                        H4: s.h4_trend,
+                        D1: s.d1_trend,
+                        validSince: s.validSince,
+                        min_lot: s.min_lot,
+                        min_margin: s.min_margin,
+                        priority: s.priority || 1
+                    }));
+                
                 ws.send(JSON.stringify({
                     type: 'signals_update',
-                    indicators: Array.from(activeSignals.values())
-                        .map(s => ({
-                            symbol: s.symbol,
-                            timeframe: s.timeframe,
-                            type: s.type,
-                            H4: s.h4_trend,
-                            D1: s.d1_trend,
-                            validSince: s.validSince,
-                            min_lot: s.min_lot,
-                            min_margin: s.min_margin,
-                            priority: s.priority || 1
-                        }))
-                        .sort((a, b) => {
-                            if (b.priority !== a.priority) return b.priority - a.priority;
-                            return new Date(a.validSince) - new Date(b.validSince);
-                        }),
+                    indicators: sortSignals(signals),
                     count: activeSignals.size,
                     timestamp: new Date().toISOString()
                 }));
@@ -371,6 +396,7 @@ server.listen(PORT, '0.0.0.0', () => {
    • Automatic cleanup of stale signals
    • Multi-EA support
    • Connection tracking
+   • Smart sorting (1000→900→600→500→300→150)
 
 Waiting for connections...
     `);
